@@ -14,6 +14,9 @@ from selenium.webdriver.common.action_chains import ActionChains
 from oauth2client.service_account import ServiceAccountCredentials
 import gspread
 from random import uniform
+from cap_solve import solve_cap
+from queue import Queue
+import datetime
 
 chromedriver_path = 'chromedriver-win32/chromedriver.exe'
 
@@ -59,6 +62,7 @@ def configure_chrome_options(proxy, account_id):
     options = Options()
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    # options.add_argument("--headless=new")
     options.add_argument('--ignore-certificate-errors-spki-list')
     options.add_argument('--ignore-ssl-errors')
     options.add_argument(f"--proxy-server=http://{proxy_ip}:{proxy_port}")
@@ -71,77 +75,74 @@ def configure_chrome_options(proxy, account_id):
     return options
 
 
-def search_product_on_account(account_id, product_name, min_price, max_price, accounts):
-    account_data = accounts[account_id - 1]
-    username = account_data["username"]
-    proxy = account_data["proxy"]
 
-    options = configure_chrome_options(proxy, account_id)
-    service = Service(chromedriver_path)
-    driver = webdriver.Chrome(service=service, options=options)
-    wait = WebDriverWait(driver, 10)
+def update_google_sheet(sheet, local_csv_dir, account_count):
+    """
+    Агрегация данных из локальных CSV-файлов и запись минимальных цен в Google Таблицу.
+    """
+    final_results = {} 
 
-    cookies_path = f"cookies/cookies_{username}.pkl"
-    print(username)
-    account_min_price = None
-    account_min_price_link = None
+  
+    for account_id in range(1, account_count + 1):
+        local_csv_file = os.path.join(local_csv_dir, f"account_{account_id}.csv")
+        if os.path.exists(local_csv_file):
+            with open(local_csv_file, "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    row_index = int(row[0])
+                    product_name = row[1]
+                    price = row[2]
+                    link = row[3]
+                    username = row[4]
 
-    try:
-        driver.get("https://market.yandex.ru/")
-        load_cookies(driver, cookies_path)
-        driver.refresh()
+            
+                    if product_name not in final_results:
+                        final_results[product_name] = []
+                    final_results[product_name].append((row_index, price, link, username))
 
-        search_input = wait.until(EC.presence_of_element_located((By.ID, "header-search")))
-        search_input.send_keys(product_name)
+    for product_name, results in final_results.items():
+        if not results:
+            continue
+        min_price_entry = min(
+            results, key=lambda x: int(x[1]) if x[1] and x[1].isdigit() else float("inf")
+        )
+        row_index, price, link, username = min_price_entry
 
-        search_button = driver.find_element(By.XPATH, "//button[@data-auto='search-button']")
-        search_button.click()
-        time.sleep(uniform(10,20))
+        sheet.update_cell(row_index, 3, price)  
+        sheet.update_cell(row_index, 4, link)   
+        sheet.update_cell(row_index, 5, username) 
 
-        cheaper_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[text()='подешевле']")))
-        ActionChains(driver).move_to_element(cheaper_button).click(cheaper_button).perform()
-        time.sleep(uniform(10,20))
-
-        product_cards = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, '[data-baobab-name="productSnippet"]')))
-
-        for card in product_cards:
-            try:
-                price_container = card.find_element(By.XPATH, ".//*[@data-auto='snippet-price-current']")
-                price_text_full = price_container.text
-                price_match = re.search(r'\d+[\s\u00A0]*\d*', price_text_full)
-                if price_match:
-                    price_value = int(re.sub(r'[^\d]', '', price_match.group()))
-                    product_link = card.find_element(By.XPATH, ".//a[contains(@href, '/product--')]").get_attribute("href")
-                    if f'sku={product_name}' in product_link:
-                        if account_min_price is None or price_value < account_min_price:
-                            account_min_price = price_value
-                            account_min_price_link = product_link
-            except:
-                print(f"Не удалось найти цену или ссылку для аккаунта {username}.")
-
-        return (account_id, username, account_min_price, account_min_price_link)
-
-    except Exception as e:
-        print(f"Ошибка на аккаунте {username}: {e}")
-        return (account_id, username, None, None)
-
-    finally:
-        driver.quit()
+    print("Все данные успешно обновлены в Google Таблице.")
 
 
-def search_on_multiple_accounts(sheet, max_price, account_count, csv_path):
 
+
+def search_on_multiple_accounts(sheet, max_price, account_count, csv_path, local_csv_dir):
     accounts = read_accounts_from_csv(csv_path)
-
-
     all_rows = sheet.get_all_values()
 
+    if not os.path.exists(local_csv_dir):
+        os.makedirs(local_csv_dir)
+    else:
+        for file_name in os.listdir(local_csv_dir):
+            if file_name.endswith(".csv"):
+                file_path = os.path.join(local_csv_dir, file_name)
+                os.remove(file_path)
+        print(f"Очистка локальных таблиц ({local_csv_dir}) завершена.")
 
-    drivers = {}
-    for account_id in range(1, account_count + 1):
+    failed_accounts = []
+
+    def save_cookies(driver, path):
+        """Сохранение cookies в файл."""
+        with open(path, "wb") as file:
+            pickle.dump(driver.get_cookies(), file)
+
+    def process_account(account_id):
         account_data = accounts[account_id - 1]
         username = account_data["username"]
         proxy = account_data["proxy"]
+
+        local_csv_file = os.path.join(local_csv_dir, f"account_{account_id}.csv")
 
         options = configure_chrome_options(proxy, account_id)
         service = Service(chromedriver_path)
@@ -152,128 +153,125 @@ def search_on_multiple_accounts(sheet, max_price, account_count, csv_path):
             driver.get("https://market.yandex.ru/")
             load_cookies(driver, cookies_path)
             driver.refresh()
+
+            try:
+                login_element = driver.find_elements(By.XPATH, "//*[contains(text(), 'Войти')]")
+                if login_element:
+                    print(f"Аккаунт {username} не авторизован. Закрываем и добавляем в список неисправных.")
+                    failed_accounts.append(username)
+                    driver.quit()
+                    return
+            except:
+                pass 
+
         except Exception as e:
             print(f"Ошибка инициализации браузера для аккаунта {username}: {e}")
             driver.quit()
-            continue
+            return
 
-        drivers[account_id] = {
-            "driver": driver,
-            "username": username,
-        }
+        captcha_failures = 0
 
-    
-    def process_row(account_id, product_name):
-        driver_info = drivers[account_id]
-        driver = driver_info["driver"]
-        username = driver_info["username"]
+        for row_index, row in enumerate(all_rows[1:], start=2):
+            product_name = row[1]
+            if not product_name.strip():
+                continue
 
-        wait = WebDriverWait(driver, 10)
-        account_min_price = None
-        account_min_price_link = None
-
-        try:
-            search_input = wait.until(EC.presence_of_element_located((By.ID, "header-search")))
-            search_input.clear()
-            search_input.send_keys(product_name)
-
-            search_button = driver.find_element(By.XPATH, "//button[@data-auto='search-button']")
-            search_button.click()
-            time.sleep(uniform(10, 20))
-
-            cheaper_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[text()='подешевле']")))
-            ActionChains(driver).move_to_element(cheaper_button).click(cheaper_button).perform()
-            time.sleep(uniform(2, 4))
-            evry = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, f"//*[text()='Искать везде']")))
-            evry.click()
-            time.sleep(uniform(10, 20))
-
-            product_cards = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, '[data-baobab-name="productSnippet"]')))
-
-            for card in product_cards:
+            while captcha_failures < 5:  
                 try:
-                    price_container = card.find_element(By.XPATH, ".//*[@data-auto='snippet-price-current']")
-                    price_text_full = price_container.text
-                    price_match = re.search(r'\d+[\s\u00A0]*\d*', price_text_full)
-                    if price_match:
-                        price_value = int(re.sub(r'[^\d]', '', price_match.group()))
-                        card_text = card.text
-                        product_link = card.find_element(By.XPATH, ".//a[contains(@href, '/product--')]").get_attribute("href")
-                        if f'sku={product_name}' in product_link and 'рубежа' in card_text.lower():
-                            if account_min_price is None or price_value < account_min_price:
-                                account_min_price = price_value
-                                account_min_price_link = product_link
-                except:
-                    print(f"Не удалось найти цену или ссылку для аккаунта {username}.")
-        except Exception as e:
-            print(f"Ошибка на аккаунте {username}: {e}")
+                    wait = WebDriverWait(driver, 10)
 
-        return account_id, username, account_min_price, account_min_price_link
+            
+                    captcha_element = driver.find_elements(By.XPATH, "//div[contains(@class, 'captcha')]")
+                    if captcha_element:
+                        print(f"CAPTCHA обнаружена на аккаунте {username}, строка {row_index}. Решаем...")
+                        solve_cap(driver)
 
+                        try:
+                            search_input = wait.until(EC.presence_of_element_located((By.ID, "header-search")))
+                            print(f"CAPTCHA успешно решена для аккаунта {username}. Обновляем куки.")
+                            save_cookies(driver, cookies_path)  
+                            captcha_failures = 0  
+                            continue
+                        except:
+                            captcha_failures += 1
+                            print(f"Не удалось решить CAPTCHA для аккаунта {username}. Попытка {captcha_failures}/5.")
+                            if captcha_failures == 5:
+                                screenshot_path = f"{username}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                                driver.save_screenshot(screenshot_path)
+                                print(f"Аккаунт {username} заблокирован. Скриншот сохранён: {screenshot_path}")
+                                driver.quit()
+                                return
+                            continue  
 
-    for row_index, row in enumerate(all_rows[1:], start=2):
-        product_name = row[1] 
+                    search_input = wait.until(EC.presence_of_element_located((By.ID, "header-search")))
+                    search_input.clear()
+                    search_input.send_keys(product_name)
 
-        
-        if not product_name.strip():
-            print(f"Row {row_index}: Skipping empty product_name.")
-            continue
+                    search_button = driver.find_element(By.XPATH, "//button[@data-auto='search-button']")
+                    search_button.click()
+                    time.sleep(uniform(10, 20))
 
-        print(f"Processing product: {product_name} (Row {row_index})")
-        results = []
-        failed_accounts = []
+                    cheaper_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[text()='подешевле']")))
+                    ActionChains(driver).move_to_element(cheaper_button).click(cheaper_button).perform()
+                    time.sleep(uniform(2, 4))
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=account_count) as executor:
-            futures = [executor.submit(process_row, account_id, product_name) for account_id in drivers.keys()]
+                    evry = WebDriverWait(driver, 10).until(
+                        EC.element_to_be_clickable((By.XPATH, f"//*[text()='Искать везде']"))
+                    )
+                    evry.click()
+                    time.sleep(uniform(10, 20))
 
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    account_id, username, price, link = future.result()
-                    if price is not None:
-                        results.append((account_id, username, price, link))
-                    else:
-                        failed_accounts.append(account_id)
+                    product_cards = wait.until(
+                        EC.presence_of_all_elements_located((By.CSS_SELECTOR, '[data-baobab-name="productSnippet"]'))
+                    )
+
+                    min_price = None
+                    min_price_link = None
+
+                    for card in product_cards:
+                        try:
+                            price_container = card.find_element(By.XPATH, ".//*[@data-auto='snippet-price-current']")
+                            price_text_full = price_container.text
+                            price_match = re.search(r'\d+[\s\u00A0]*\d*', price_text_full)
+                            if price_match:
+                                price_value = int(re.sub(r'[^\d]', '', price_match.group()))
+                                product_link = card.find_element(By.XPATH, ".//a[contains(@href, '/product--')]").get_attribute("href")
+                                if min_price is None or price_value < min_price:
+                                    min_price = price_value
+                                    min_price_link = product_link
+                        except:
+                            continue
+
+                    with open(local_csv_file, "a", newline="", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([row_index, product_name, min_price, min_price_link, username])
+
+                    break  
+
                 except Exception as e:
-                    print(f"Ошибка в потоке: {e}")
-                    failed_accounts.append(account_id)
+                    print(f"Ошибка на аккаунте {username}, строка {row_index}: {e}")
+                    captcha_failures += 1
+                    if captcha_failures >= 5:
+                        screenshot_path = f"{username}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                        driver.save_screenshot(screenshot_path)
+                        print(f"Аккаунт {username} заблокирован. Скриншот сохранён: {screenshot_path}")
+                        driver.quit()
+                        return
 
-       
-        price_to_accounts = {}
-        for _, username, price, link in results:
-            if price is not None:
-                if price not in price_to_accounts:
-                    price_to_accounts[price] = []
-                price_to_accounts[price].append((username, link))
+        driver.quit()
 
-       
-        if price_to_accounts:
-            overall_min_price = min(price_to_accounts.keys())
-            accounts_with_min_price = price_to_accounts[overall_min_price]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=account_count) as executor:
+        executor.map(process_account, range(1, account_count + 1))
 
-            account_names = ", ".join(username for username, _ in accounts_with_min_price)
-            links = ", ".join(link for _, link in accounts_with_min_price)
-
-          
-            sheet.update_cell(row_index, 3, overall_min_price) 
-            sheet.update_cell(row_index, 4, links) 
-            sheet.update_cell(row_index, 5, account_names) 
-
-            print(f"Row {row_index}: Minimum price: {overall_min_price} ₽, Accounts: {account_names}, Links: {links}")
-        else:
-            print(f"Row {row_index}: No price found for {product_name}.")
-            sheet.update_cell(row_index, 3, "Not found") 
-            sheet.update_cell(row_index, 4, "Not found")  
-            sheet.update_cell(row_index, 5, "Not found")  
-
-        if failed_accounts:
-            print(f"Row {row_index}: Failed accounts (possibly encountered CAPTCHA): {failed_accounts}")
-
-    
-    for driver_info in drivers.values():
-        driver_info["driver"].quit()
+    if failed_accounts:
+        print("Список неисправных аккаунтов:")
+        for username in failed_accounts:
+            print(f"- {username}")
 
 
-sheet = connect_to_google_sheets("Sellerbot")
+    update_google_sheet(sheet, local_csv_dir, account_count)
 
-# Пример вызова функции
-search_on_multiple_accounts(sheet,1000000, 4,csv_path='accounts.csv')
+sheet = connect_to_google_sheets("Parser_test")
+
+
+search_on_multiple_accounts(sheet,1000000, 10,csv_path='accounts.csv',local_csv_dir='csvs')

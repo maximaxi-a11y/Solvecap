@@ -15,7 +15,7 @@ import shutil
 import curses
 import csv
 
-service = Service('/usr/local/bin/chromedriver')
+service = Service('chromedriver-win32\chromedriver.exe')
 
 error_accounts = []
 
