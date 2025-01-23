@@ -3,7 +3,6 @@ import re
 import time
 import csv
 import pickle
-import concurrent.futures
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
@@ -15,8 +14,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 import gspread
 from random import uniform
 from cap_solve import solve_cap
-from queue import Queue
-import datetime
+import threading
+import traceback
+
 
 chromedriver_path = 'chromedriver-win32/chromedriver.exe'
 
@@ -133,7 +133,6 @@ def search_on_multiple_accounts(sheet, max_price, account_count, csv_path, local
     failed_accounts = []
 
     def save_cookies(driver, path):
-        """Сохранение cookies в файл."""
         with open(path, "wb") as file:
             pickle.dump(driver.get_cookies(), file)
 
@@ -142,67 +141,59 @@ def search_on_multiple_accounts(sheet, max_price, account_count, csv_path, local
         username = account_data["username"]
         proxy = account_data["proxy"]
 
-        local_csv_file = os.path.join(local_csv_dir, f"account_{account_id}.csv")
+        local_csv_file = os.path.join(local_csv_dir, f"{username}.csv")
 
         options = configure_chrome_options(proxy, account_id)
         service = Service(chromedriver_path)
         driver = webdriver.Chrome(service=service, options=options)
 
         cookies_path = f"cookies/cookies_{username}.pkl"
+        evry_element_skipped = False
+
         try:
             driver.get("https://market.yandex.ru/")
             load_cookies(driver, cookies_path)
             driver.refresh()
 
-            try:
-                login_element = driver.find_elements(By.XPATH, "//*[contains(text(), 'Войти')]")
-                if login_element:
-                    print(f"Аккаунт {username} не авторизован. Закрываем и добавляем в список неисправных.")
-                    failed_accounts.append(username)
-                    driver.quit()
-                    return
-            except:
-                pass 
+            if driver.find_elements(By.XPATH, "//*[contains(text(), 'Войти')]"):
+                print(f"Аккаунт {username} не авторизован. Закрываем и добавляем в список неисправных.")
+                failed_accounts.append(username)
+                driver.quit()
+                return
 
         except Exception as e:
             print(f"Ошибка инициализации браузера для аккаунта {username}: {e}")
             driver.quit()
             return
 
-        captcha_failures = 0
+        def handle_captcha():
+            try:
+                captcha_text_present = driver.find_elements(By.XPATH, "//*[contains(text(), 'а не робот')]")
+                captcha_checkbox = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, 'js-button'))
+                )
+                if captcha_text_present and captcha_checkbox:
+                    print(f"CAPTCHA обнаружена на аккаунте {username}. Пытаемся решить...")
+                    solve_cap(driver)
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.ID, "header-search"))
+                    )
+                    print(f"CAPTCHA успешно решена для аккаунта {username}. Обновляем куки.")
+                    save_cookies(driver, cookies_path)
+                    return True
+            except Exception as e:
+                print(f"Ошибка при решении CAPTCHA для аккаунта {username}: {e}")
+                return False
 
         for row_index, row in enumerate(all_rows[1:], start=2):
             product_name = row[1]
             if not product_name.strip():
                 continue
 
-            while captcha_failures < 5:  
+            retry_count = 0
+            while retry_count < 5:
                 try:
                     wait = WebDriverWait(driver, 10)
-
-            
-                    captcha_element = driver.find_elements(By.XPATH, "//div[contains(@class, 'captcha')]")
-                    if captcha_element:
-                        print(f"CAPTCHA обнаружена на аккаунте {username}, строка {row_index}. Решаем...")
-                        solve_cap(driver)
-
-                        try:
-                            search_input = wait.until(EC.presence_of_element_located((By.ID, "header-search")))
-                            print(f"CAPTCHA успешно решена для аккаунта {username}. Обновляем куки.")
-                            save_cookies(driver, cookies_path)  
-                            captcha_failures = 0  
-                            continue
-                        except:
-                            captcha_failures += 1
-                            print(f"Не удалось решить CAPTCHA для аккаунта {username}. Попытка {captcha_failures}/5.")
-                            if captcha_failures == 5:
-                                screenshot_path = f"{username}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                                driver.save_screenshot(screenshot_path)
-                                print(f"Аккаунт {username} заблокирован. Скриншот сохранён: {screenshot_path}")
-                                driver.quit()
-                                return
-                            continue  
-
                     search_input = wait.until(EC.presence_of_element_located((By.ID, "header-search")))
                     search_input.clear()
                     search_input.send_keys(product_name)
@@ -215,11 +206,16 @@ def search_on_multiple_accounts(sheet, max_price, account_count, csv_path, local
                     ActionChains(driver).move_to_element(cheaper_button).click(cheaper_button).perform()
                     time.sleep(uniform(2, 4))
 
-                    evry = WebDriverWait(driver, 10).until(
-                        EC.element_to_be_clickable((By.XPATH, f"//*[text()='Искать везде']"))
-                    )
-                    evry.click()
-                    time.sleep(uniform(10, 20))
+                    if not evry_element_skipped:
+                        try:
+                            evry = WebDriverWait(driver, 10).until(
+                                EC.element_to_be_clickable((By.XPATH, f"//*[text()='Искать везде']"))
+                            )
+                            evry.click()
+                            time.sleep(uniform(10, 20))
+                        except:
+                            print(f"Элемент 'Искать везде' не найден на аккаунте {username}. Пропускаем его в будущем.")
+                            evry_element_skipped = True
 
                     product_cards = wait.until(
                         EC.presence_of_all_elements_located((By.CSS_SELECTOR, '[data-baobab-name="productSnippet"]'))
@@ -246,22 +242,41 @@ def search_on_multiple_accounts(sheet, max_price, account_count, csv_path, local
                         writer = csv.writer(f)
                         writer.writerow([row_index, product_name, min_price, min_price_link, username])
 
-                    break  
+                    break
 
-                except Exception as e:
-                    print(f"Ошибка на аккаунте {username}, строка {row_index}: {e}")
-                    captcha_failures += 1
-                    if captcha_failures >= 5:
-                        screenshot_path = f"{username}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                        driver.save_screenshot(screenshot_path)
-                        print(f"Аккаунт {username} заблокирован. Скриншот сохранён: {screenshot_path}")
-                        driver.quit()
-                        return
+                except Exception:
+                    error_message = traceback.format_exc()
+                    print(f"Ошибка на аккаунте {username}, строка {row_index}: {error_message}")
+                    captcha_text_present = driver.find_elements(By.XPATH, "//*[contains(text(), 'а не робот')]")
+                    captcha_checkbox = driver.find_elements(By.ID, 'js-button')
+                    if captcha_text_present and captcha_checkbox:
+                        if not handle_captcha():
+                            print(f"Аккаунт {username} заблокирован из-за невозможности пройти CAPTCHA.")
+                            driver.quit()
+                            return
+                        else:
+                            print(f"CAPTCHA решена, но ошибка сохраняется. Перезапускаем текущий шаг для аккаунта {username}.")
+                            continue
+                    else:
+                        retry_count += 1
+                        if retry_count >= 5:
+                            print(f"Слишком много ошибок на аккаунте {username}, строка {row_index}. Пропускаем строку.")
+                            break
 
         driver.quit()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=account_count) as executor:
-        executor.map(process_account, range(1, account_count + 1))
+    threads = []
+    for account_id in range(1, account_count + 1):
+        thread = threading.Thread(target=process_account, args=(account_id,))
+        threads.append(thread)
+        thread.start()
+
+    for thread in threads:
+        thread.join()
+
+    print("Обработка всех аккаунтов завершена.")
+
+
 
     if failed_accounts:
         print("Список неисправных аккаунтов:")
@@ -274,4 +289,4 @@ def search_on_multiple_accounts(sheet, max_price, account_count, csv_path, local
 sheet = connect_to_google_sheets("Parser_test")
 
 
-search_on_multiple_accounts(sheet,1000000, 10,csv_path='accounts.csv',local_csv_dir='csvs')
+search_on_multiple_accounts(sheet,1000000, 3,csv_path='accounts.csv',local_csv_dir='csvs')

@@ -53,7 +53,7 @@ def create_proxy_auth_extension(proxy_ip, proxy_port, proxy_user, proxy_pass):
     );
     """
 
-    extension_dir = os.path.join(os.getcwd(), f"proxys/proxy_auth_plugin_{proxy_ip+proxy_ip}")
+    extension_dir = os.path.join(os.getcwd(), f"proxys/proxy_auth_plugin_{proxy_ip+proxy_port}")
     os.makedirs(extension_dir, exist_ok=True)
 
     manifest_content = """{
@@ -337,7 +337,7 @@ def manual_login_and_save_cookies_from_csv(csv_path):
 
 # Пример использования
 def process_proxies(csv_file_path):
-    try:
+    # try:
         with open(csv_file_path, mode='r', encoding='utf-8') as csv_file:
             reader = csv.DictReader(csv_file)
             
@@ -346,7 +346,7 @@ def process_proxies(csv_file_path):
             for column in required_columns:
                 if column not in reader.fieldnames:
                     raise ValueError(f"CSV file does not contain the required column: {column}")
-            
+
             for row in reader:
                 proxy = row['proxy']
                 username = row['username']
@@ -357,17 +357,16 @@ def process_proxies(csv_file_path):
                     continue
                 
                 proxy_ip, proxy_port, proxy_user, proxy_pass = proxy_parts
-                
                 # Передаем части прокси и username в функцию
                 proxy_extension = create_proxy_auth_extension(proxy_ip, proxy_port, proxy_user, proxy_pass)
                 print(f"Created proxy extension: {proxy_extension}")
     
-    except FileNotFoundError:
-        print(f"CSV file not found: {csv_file_path}")
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    # except FileNotFoundError:
+    #     print(f"CSV file not found: {csv_file_path}")
+    # except Exception as e:
+    #     print(f"An error occurred: {e}")
 
-
+process_proxies('accounts.csv')
 
 
 def load_browser_with_cookies(username, csv_path):
@@ -420,8 +419,8 @@ def load_browser_with_cookies(username, csv_path):
         input("Нажмите Enter, чтобы закрыть браузер.")
         driver.quit()
 
-# Пример использования
-csv_path = "accounts.csv"  # Замените на путь к вашему CSV файлу
-username = input()  # Замените на имя пользователя
-load_browser_with_cookies(username, csv_path)
+# # Пример использования
+# csv_path = "accounts.csv"  # Замените на путь к вашему CSV файлу
+# username = input()  # Замените на имя пользователя
+# load_browser_with_cookies(username, csv_path)
 
