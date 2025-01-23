@@ -53,7 +53,7 @@ def create_proxy_auth_extension(proxy_ip, proxy_port, proxy_user, proxy_pass):
     );
     """
 
-    extension_dir = os.path.join(os.getcwd(), f"proxys/proxy_auth_plugin_{proxy_ip}")
+    extension_dir = os.path.join(os.getcwd(), f"proxys/proxy_auth_plugin_{proxy_ip+proxy_ip}")
     os.makedirs(extension_dir, exist_ok=True)
 
     manifest_content = """{
@@ -248,42 +248,6 @@ def manual_login_and_save_cookies(username, password, question, proxy):
     return cookies_saved
 
 
-
-
-def curses_menu(stdscr):
-    curses.curs_set(0)  # Скрыть курсор
-    stdscr.clear()
-    
-    menu = ["1. Login and Save Cookies", "2. Manual Login and Save Cookies", "3. Load parameters from file", "4. Exit"]
-    current_row = 0
-    
-    # Функция для отображения меню
-    def print_menu():
-        stdscr.clear()
-        stdscr.addstr(0, 0, "Используйте стрелки вверх и вниз для навигации и Enter для выбора:", curses.A_BOLD)
-        for idx, row in enumerate(menu):
-            if idx == current_row:
-                stdscr.addstr(idx + 2, 0, row, curses.color_pair(1))
-            else:
-                stdscr.addstr(idx + 2, 0, row)
-        stdscr.refresh()
-    
- 
-    curses.start_color()
-    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
-    
-    while True:
-        print_menu()
-        key = stdscr.getch()
-        
-        if key == curses.KEY_UP and current_row > 0:
-            current_row -= 1
-        elif key == curses.KEY_DOWN and current_row < len(menu) - 1:
-            current_row += 1
-        elif key == ord("\n"):
-            return current_row  
-
-
 def load_parameters_from_file(filename):
     try:
         with open(filename, 'r') as file:
@@ -305,48 +269,159 @@ def load_parameters_from_file(filename):
         print(f"Ошибка при чтении файла {filename}: {e}")
 
 
-def main():
-    def get_user_input(prompt):
-        user_input = input(f"{prompt} (или 'q' для выхода): ").strip()
-        if user_input.lower() == 'q':
-            print("Выход из программы.")
-            exit()
-        return user_input
+
+def manual_login_and_save_cookies_from_csv(csv_path):
+    """
+    Функция читает данные из CSV файла, выполняет ручной вход и сохраняет cookies для каждой учетной записи.
     
-    while True:
-        selected_option = curses.wrapper(curses_menu)
-        
-        if selected_option == 3:  
-            print("Выход из программы.")
-            break
-        elif selected_option == 2:  
-            filename = get_user_input("Введите имя файла с параметрами")
-            load_parameters_from_file(filename)
-            continue
+    :param csv_path: Путь к CSV файлу с данными учетных записей (username, password, question, proxy).
+    """
+    if not os.path.exists(csv_path):
+        print(f"CSV file not found: {csv_path}")
+        return
 
-        
-        username = get_user_input("Введите имя пользователя")
-        password = get_user_input("Введите пароль")
-        question = get_user_input("Введите секретный вопрос (если требуется)")
-        proxy = get_user_input("Введите прокси (в формате ip:port:username:password)")
-        
+    # Считываем CSV файл
+    try:
+        accounts_df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"Ошибка чтения CSV файла: {e}")
+        return
 
-        if selected_option == 0:
-            print("\nВыполняется login_and_save_cookies...")
-            success = login_and_save_cookies(username, password, question, proxy)
-            if success:
-                print("Куки успешно сохранены.")
-            else:
-                print("Не удалось сохранить куки.")
-        
-        elif selected_option == 1:
-            print("\nВыполняется manual_login_and_save_cookies...")
-            success = manual_login_and_save_cookies(username, password, question, proxy)
-            if success:
-                print("Куки успешно сохранены после ручного входа.")
-            else:
-                print("Не удалось сохранить куки после ручного входа.")
+    # Проверяем наличие необходимых столбцов
+    required_columns = {"username", "password", "question", "proxy"}
+    if not required_columns.issubset(accounts_df.columns):
+        print(f"CSV файл должен содержать столбцы: {', '.join(required_columns)}")
+        return
+
+    # Проходим по каждой строке CSV файла
+    for index, row in accounts_df.iterrows():
+        username = row["username"]
+        password = row["password"]
+        question = row["question"]
+        proxy = row["proxy"]
+
+        driver = setup_driver(proxy)
+        cookies_saved = False
+
+        try:
+            driver.get("https://market.yandex.ru/")
+            print(f"Пожалуйста, выполните вход вручную для учетной записи: {username}")
+            print("После завершения входа нажмите Enter для сохранения cookies.")
+            print("Если хотите отменить сессию, нажмите 'q' и затем Enter.")
+
+            user_input = input("Нажмите Enter для сохранения cookies или 'q' для отмены: ").strip().lower()
+
+            if user_input == 'q':
+                print(f"Сессия входа для {username} отменена пользователем.")
+                continue
+
+            # Сохраняем cookies в файл
+            cookies_path = f"cookies/cookies_{username}.pkl"
+            os.makedirs(os.path.dirname(cookies_path), exist_ok=True)
+
+            with open(cookies_path, "wb") as cookies_file:
+                pickle.dump(driver.get_cookies(), cookies_file)
+            cookies_saved = True
+            print(f"Cookies успешно сохранены для {username} в {cookies_path}")
+
+        except Exception as e:
+            print(f"Ошибка во время ручного входа для {username}: {e}")
+
+        finally:
+            driver.quit()
+
+        if cookies_saved:
+            print(f"Процесс для {username} завершен успешно.")
+        else:
+            print(f"Процесс для {username} завершен с ошибкой.")
+
+# Пример использования
+def process_proxies(csv_file_path):
+    try:
+        with open(csv_file_path, mode='r', encoding='utf-8') as csv_file:
+            reader = csv.DictReader(csv_file)
+            
+            # Проверяем, что необходимые столбцы присутствуют в CSV
+            required_columns = ['proxy', 'username']
+            for column in required_columns:
+                if column not in reader.fieldnames:
+                    raise ValueError(f"CSV file does not contain the required column: {column}")
+            
+            for row in reader:
+                proxy = row['proxy']
+                username = row['username']
+                
+                proxy_parts = proxy.split(':')
+                if len(proxy_parts) != 4:
+                    print(f"Skipping invalid proxy format: {proxy}")
+                    continue
+                
+                proxy_ip, proxy_port, proxy_user, proxy_pass = proxy_parts
+                
+                # Передаем части прокси и username в функцию
+                proxy_extension = create_proxy_auth_extension(proxy_ip, proxy_port, proxy_user, proxy_pass)
+                print(f"Created proxy extension: {proxy_extension}")
     
+    except FileNotFoundError:
+        print(f"CSV file not found: {csv_file_path}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
-if __name__ == "__main__":
-    main()
+
+
+
+def load_browser_with_cookies(username, csv_path):
+    """
+    Открывает браузер с cookies и прокси на основе имени пользователя.
+
+    :param username: Имя пользователя, для которого нужно загрузить cookies.
+    :param csv_path: Путь к CSV файлу с данными учетных записей.
+    """
+    cookies_path = f"cookies/cookies_{username}.pkl"
+    if not os.path.exists(cookies_path):
+        print(f"Cookies для пользователя {username} не найдены в {cookies_path}")
+        return
+
+    # Чтение данных из CSV
+    try:
+        accounts_df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"Ошибка чтения CSV файла: {e}")
+        return
+
+    # Поиск строки с указанным пользователем
+    user_data = accounts_df[accounts_df["username"] == username]
+    if user_data.empty:
+        print(f"Данные для пользователя {username} не найдены в CSV файле.")
+        return
+
+    proxy = user_data.iloc[0]["proxy"]
+
+    driver = setup_driver(proxy)
+
+    try:
+        driver.get("https://market.yandex.ru/")
+
+        # Загрузка cookies в браузер
+        with open(cookies_path, "rb") as cookies_file:
+            cookies = pickle.load(cookies_file)
+
+        for cookie in cookies:
+            driver.add_cookie(cookie)
+
+        print(f"Cookies для {username} успешно загружены.")
+
+        # Перезагружаем страницу, чтобы применить cookies
+        driver.refresh()
+
+    except Exception as e:
+        print(f"Ошибка при загрузке браузера с cookies для {username}: {e}")
+    finally:
+        input("Нажмите Enter, чтобы закрыть браузер.")
+        driver.quit()
+
+# Пример использования
+csv_path = "accounts.csv"  # Замените на путь к вашему CSV файлу
+username = input()  # Замените на имя пользователя
+load_browser_with_cookies(username, csv_path)
+
